@@ -1,0 +1,28 @@
+name: Sync Images to Cloudflare R2
+
+on:
+  push:
+    branches:
+      - main # Đổi thành 'master' nếu repo của bạn dùng branch master
+    paths:
+      - '*.png' # Chạy tự động khi có thay đổi file ảnh .png
+  workflow_dispatch: # Cho phép bấm nút chạy thủ công bất cứ lúc nào
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Sync to Cloudflare R2
+        uses: jakejarvis/s3-sync-action@master
+        with:
+          args: --acl public-read --follow-symlinks --delete
+        env:
+          AWS_S3_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_S3_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          SOURCE_DIR: '' # Để trống nếu ảnh nằm ở thư mục gốc repo. Nếu nằm trong thư mục con thì điền tên thư mục (vd: 'html/images')
+          DEST_DIR: ''   # Để trống để đẩy thẳng vào gốc R2 Bucket
