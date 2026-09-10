@@ -14,7 +14,7 @@ on:
       - '**/*.JPEG'
       - '**/*.webp'
       - '**/*.WEBP'
-  workflow_dispatch:
+  workflow_dispatch: # Nút bấm thủ công trên GitHub UI
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,9 +38,13 @@ jobs:
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          THRESHOLD=500  # Ngưỡng: Nếu tổng số file thay đổi > 500 sẽ đổi sang Full Sync
+          THRESHOLD=500  # Ngưỡng file thay đổi
 
-          # 1. Bắt danh sách file bằng Git
+          # Tối ưu AWS CLI cho Full Sync
+          aws configure set default.s3.max_concurrent_requests 30
+          aws configure set default.s3.max_queue_size 10000
+
+          # 1. Bắt danh sách file thay đổi bằng Git
           git diff --name-only --diff-filter=AM HEAD~1 HEAD | grep -iE '\.(png|jpg|jpeg|webp)$' > added_files.txt || true
           git diff --name-only --diff-filter=D HEAD~1 HEAD | grep -iE '\.(png|jpg|jpeg|webp)$' > deleted_files.txt || true
 
@@ -48,27 +52,26 @@ jobs:
           DELETED_COUNT=$(wc -l < deleted_files.txt)
           TOTAL_CHANGES=$((ADDED_COUNT + DELETED_COUNT))
 
+          echo "Event Name: ${{ github.event_name }}"
           echo "Detected $ADDED_COUNT added/modified files and $DELETED_COUNT deleted files."
 
-          # 2. KIỂM TRA ĐIỀU KIỆN ĐỂ CHỌN CHẾ ĐỘ
+          # 2. KIỂM TRA ĐIỀU KIỆN ĐỒNG BỘ
 
-          # Trường hợp A: Thay đổi số lượng lớn (> 500 file) -> Chuyển sang Full Sync qua AWS S3 Sync
-          if [ "$TOTAL_CHANGES" -gt "$THRESHOLD" ]; then
+          # Trường hợp 1: Bấm nút "Run workflow" THỦ CÔNG HOẶC thay đổi quá 500 file -> Bắt buộc FULL SYNC
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$TOTAL_CHANGES" -gt "$THRESHOLD" ]; then
             echo "================================================="
-            echo "Large changeset detected ($TOTAL_CHANGES files). Switching to FULL SYNC mode..."
+            echo "Triggered via Manual Run or Large Changeset ($TOTAL_CHANGES files)."
+            echo "Executing FULL SYNC mode via AWS S3 Sync..."
             echo "================================================="
             
-            # Sử dụng aws s3 sync thay cho rclone để tránh lỗi 403/501
             aws s3 sync . "s3://${R2_BUCKET_NAME}" \
               --endpoint-url "$ENDPOINT" \
               --delete \
               --exclude "*" \
-              --include "*.png" --include "*.PNG" \
-              --include "*.jpg" --include "*.JPG" \
-              --include "*.jpeg" --include "*.JPEG" \
-              --include "*.webp" --include "*.WEBP"
+              --include "*.png" --include "*.jpg" --include "*.jpeg" --include "*.webp" \
+              --include "*.PNG" --include "*.JPG" --include "*.JPEG" --include "*.WEBP"
 
-          # Trường hợp B: Thay đổi ít (< 500 file) -> Chế độ Delta Sync siêu tốc (25 workers)
+          # Trường hợp 2: Push code tự động với < 500 file -> Chạy Delta Sync siêu tốc
           elif [ "$TOTAL_CHANGES" -gt 0 ]; then
             echo "================================================="
             echo "Small changeset detected ($TOTAL_CHANGES files). Using FAST DELTA SYNC mode..."
