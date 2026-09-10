@@ -1,4 +1,4 @@
-name: Sync Images to Cloudflare R2
+name: Sync Images to Cloudflare R2 (Smart Hybrid)
 
 on:
   push:
@@ -9,9 +9,16 @@ on:
       - '**/*.png'
       - '**/*.PNG'
       - '**/*.jpg'
+      - '**/*.JPG'
       - '**/*.jpeg'
+      - '**/*.JPEG'
       - '**/*.webp'
+      - '**/*.WEBP'
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -19,15 +26,75 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Sync to Cloudflare R2
-        uses: jakejarvis/s3-sync-action@master
         with:
-          args: --acl public-read --follow-symlinks --delete
+          fetch-depth: 2
+
+      - name: Smart Sync Images to R2
         env:
-          AWS_S3_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_S3_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          SOURCE_DIR: ''
-          DEST_DIR: ''
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          THRESHOLD=500  # Ngưỡng: Nếu tổng số file thay đổi > 500 sẽ đổi sang Full Sync
+
+          # 1. Bắt danh sách file bằng Git
+          git diff --name-only --diff-filter=AM HEAD~1 HEAD | grep -iE '\.(png|jpg|jpeg|webp)$' > added_files.txt || true
+          git diff --name-only --diff-filter=D HEAD~1 HEAD | grep -iE '\.(png|jpg|jpeg|webp)$' > deleted_files.txt || true
+
+          ADDED_COUNT=$(wc -l < added_files.txt)
+          DELETED_COUNT=$(wc -l < deleted_files.txt)
+          TOTAL_CHANGES=$((ADDED_COUNT + DELETED_COUNT))
+
+          echo "Detected $ADDED_COUNT added/modified files and $DELETED_COUNT deleted files."
+
+          # 2. KIỂM TRA ĐIỀU KIỆN ĐỂ CHỌN CHẾ ĐỘ
+
+          # Trường hợp A: Thay đổi số lượng lớn (> 500 file) -> Chuyển sang Full Sync qua AWS S3 Sync
+          if [ "$TOTAL_CHANGES" -gt "$THRESHOLD" ]; then
+            echo "================================================="
+            echo "Large changeset detected ($TOTAL_CHANGES files). Switching to FULL SYNC mode..."
+            echo "================================================="
+            
+            # Sử dụng aws s3 sync thay cho rclone để tránh lỗi 403/501
+            aws s3 sync . "s3://${R2_BUCKET_NAME}" \
+              --endpoint-url "$ENDPOINT" \
+              --delete \
+              --exclude "*" \
+              --include "*.png" --include "*.PNG" \
+              --include "*.jpg" --include "*.JPG" \
+              --include "*.jpeg" --include "*.JPEG" \
+              --include "*.webp" --include "*.WEBP"
+
+          # Trường hợp B: Thay đổi ít (< 500 file) -> Chế độ Delta Sync siêu tốc (25 workers)
+          elif [ "$TOTAL_CHANGES" -gt 0 ]; then
+            echo "================================================="
+            echo "Small changeset detected ($TOTAL_CHANGES files). Using FAST DELTA SYNC mode..."
+            echo "================================================="
+
+            # Upload file thay đổi
+            if [ -s added_files.txt ]; then
+              export ENDPOINT R2_BUCKET_NAME
+              cat added_files.txt | xargs -P 25 -I {} bash -c '
+                if [ -f "$1" ]; then
+                  echo "Uploading: $1"
+                  aws s3 cp "$1" "s3://${R2_BUCKET_NAME}/$1" --endpoint-url "$ENDPOINT"
+                fi
+              ' _ {}
+            fi
+
+            # Xóa file bị hủy
+            if [ -s deleted_files.txt ]; then
+              split -l 1000 deleted_files.txt batch_del_
+              for batch_file in batch_del_*; do
+                jq -n --rawfile lines "$batch_file" '{Objects: ($lines | split("\n") | map(select(length > 0) | {Key: .})), Quiet: true}' > payload.json
+                aws s3api delete-objects --bucket "$R2_BUCKET_NAME" --delete file://payload.json --endpoint-url "$ENDPOINT"
+                rm -f "$batch_file" payload.json
+              done
+            fi
+
+          else
+            echo "No image changes detected in this commit."
+          fi
