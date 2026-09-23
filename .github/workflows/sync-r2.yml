@@ -72,8 +72,6 @@ jobs:
               --include "*.png" --include "*.jpg" --include "*.jpeg" --include "*.webp" \
               --include "*.PNG" --include "*.JPG" --include "*.JPEG" --include "*.WEBP"
 
-            echo "HAS_CHANGES=true" >> $GITHUB_ENV
-
           # Trường hợp 2: Push code tự động với < 500 file -> Chạy Delta Sync siêu tốc
           elif [ "$TOTAL_CHANGES" -gt 0 ]; then
             echo "================================================="
@@ -103,22 +101,6 @@ jobs:
               done
             fi
 
-            echo "HAS_CHANGES=true" >> $GITHUB_ENV
-
           else
             echo "No image changes detected in this commit."
-            echo "HAS_CHANGES=false" >> $GITHUB_ENV
           fi
-
-      # 3. TỰ ĐỘNG XÓA CACHE CLOUDFLARE KHI CÓ THAY ĐỔI
-      - name: Purge Cloudflare Cache
-        if: env.HAS_CHANGES == 'true'
-        env:
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-        run: |
-          echo "Purging Cloudflare Edge Cache..."
-          curl -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
-            -H "Authorization: Bearer ${CF_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data '{"purge_everything":true}'
